@@ -187,7 +187,7 @@ head(img_mapper)
 ```
 
 
-Things to consider for this dataset for data quality related issues:
+Things to consider for data quality related issues:
 
 Inconsistent Age Format: The Age column contains values in the format Age: XX (e.g., Age: 65), which needs to be converted to numeric values and remove the string portion so the values are congruent.
 
