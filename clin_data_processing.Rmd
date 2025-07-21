@@ -1,0 +1,206 @@
+---
+title: "Introduction to Data Integration for Health Data"
+author: "Amber Fedynak"
+date: "2025-07-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(lubridate)
+```
+
+## Loading Files
+
+```{r}
+setwd("/Users/admin/Desktop/med_imaging/")
+
+# Read the CSV files
+admissions_surg <- read_csv("admissions_surg.csv")
+admissions_med <- read_csv("admissions_med.csv")
+imaging <- read_csv("imaging.csv")
+
+# Display the first few rows of each to confirm the data has been loaded correctly
+head(admissions_surg)
+head(admissions_med)
+head(imaging)
+
+```
+
+## De-identify files
+
+```{r}
+
+# Combine the IDs from both surgical and medical admissions, then remove duplicates
+all_ids <- unique(c(admissions_surg$ID, admissions_med$ID))
+
+# View the first few IDs
+head(all_ids)
+
+# Create a de-identification mapping
+q1b <- data.frame(
+  ID = all_ids,
+  DE_ID = paste0("DE_", sprintf("%05d", seq_along(all_ids)))
+)
+
+# Display the first 10 rows of q1b
+head(q1b, 10)
+
+# Check if all DE_IDs are unique
+all_unique <- length(unique(q1b$DE_ID)) == length(q1b$DE_ID)
+all_unique
+
+# De-identify the datasets by merging with q1b
+admissions_surg_deid <- admissions_surg %>%
+  left_join(q1b, by = "ID") %>%
+  select(DE_ID, everything(), -ID)
+
+admissions_med_deid <- admissions_med %>%
+  left_join(q1b, by = "ID") %>%
+  select(DE_ID, everything(), -ID)
+
+imaging_deid <- imaging %>%
+  left_join(q1b, by = "ID") %>%
+  select(DE_ID, everything(), -ID)
+
+# Display the first 5 rows of each de-identified dataset
+head(admissions_surg_deid)
+head(admissions_med_deid)
+head(imaging_deid)
+```
+
+
+```{r}
+# Combine the admissions_surg_deid and admissions_med_deid into one data frame
+admissions_combined <- bind_rows(admissions_surg_deid, admissions_med_deid)
+
+# Merge with the imaging data on DE_ID
+admissions_img <- left_join(admissions_combined, imaging_deid, by = "DE_ID")
+
+# Display the first few rows of the final merged data frame
+head(admissions_img)
+```
+
+
+```{r}
+# Combine the admissions_surg_deid and admissions_med_deid into one data frame
+admissions_combined <- bind_rows(admissions_surg_deid, admissions_med_deid)
+
+# Merge with the imaging data on DE_ID
+admissions_img <- left_join(admissions_combined, imaging_deid, by = "DE_ID")
+
+```
+
+
+```{r}
+admissions_img <- admissions_img %>%
+  mutate(
+    admission_datetime = ymd(ADMISSION.DATE) + hms(ADMISSION.TIME),
+    discharge_datetime = ymd(DISCHARGE.DATE) + hms(DISCHARGE.TIME)
+  )
+
+# Calculate the length of stay in days 
+admissions_img <- admissions_img %>%
+  mutate(
+    length_of_stay = as.numeric(difftime(discharge_datetime, admission_datetime, units = "days"))
+  )
+
+mean_length_of_stay_by_dept <- admissions_img %>%
+  filter(!is.na(DEPARTMENT), DEPARTMENT != "NaN", !is.na(length_of_stay)) %>%  # Drop rows where DEPARTMENT is NA or "NaN" and length_of_stay is NA
+  group_by(DEPARTMENT) %>%
+  summarise(mean_length_of_stay = round(mean(length_of_stay), 0))  # Calculate mean and round
+
+# Print the mean length of stay for each department (rounded)
+print(mean_length_of_stay_by_dept)
+```
+
+
+```{r}
+# Filter to the first performed test for each test_name
+q4_df <- imaging %>%
+  arrange(test_name, performed_date) %>%  # Sort by test_name and performed_date
+  group_by(test_name) %>%                 # Group by test_name
+  slice(1) %>%                            # Take the first row for each test_name group
+  ungroup()                               # Ungroup the data after the operation
+
+# Transform the data into wide format
+q4_df_wide <- q4_df %>%
+  pivot_wider(
+    names_from = test_name,                # Each test_name becomes a column
+    values_from = performed_date           # The performed_date will be the values
+  )
+
+# Display the head of the resulting wide-format table
+head(q4_df_wide)
+
+```
+
+
+```{r}
+# Remove rows with 2 or more missing values from admissions_img
+q5_df <- admissions_img %>%
+  filter(rowSums(is.na(.)) < 2)  # Keep rows with fewer than 2 NA values
+
+# Calculate missing rate (%) in each field from q5_df
+missing_rate <- colSums(is.na(q5_df)) / nrow(q5_df) * 100
+
+# Create a tidy data frame and print the result
+data.frame(
+  Variable = names(missing_rate),
+  MissingRate = round(missing_rate, 2)
+) %>%
+  arrange(desc(MissingRate)) %>%  
+  print()
+```
+
+
+```{r}
+# Create frequency table of unique test_name with decreasing order of frequency
+img_mapper <- imaging %>%
+  count(test_name) %>%             # Count occurrences of each test_name
+  arrange(desc(n))                 # Sort by frequency in decreasing order
+
+img_mapper <- img_mapper %>%
+  rename(Frequency = n)
+
+# Add mapped_test column
+img_mapper <- img_mapper %>%
+  mutate(mapped_test = case_when(
+    grepl("US", test_name, ignore.case = TRUE) ~ "US",           # Includes 'US' or 'Ultrasound'
+    grepl("CT", test_name, ignore.case = TRUE) ~ "CT",           # Includes 'CT'
+    TRUE ~ "Others"                                              # Other cases
+  ))
+
+# Add mapped_bodypart column
+img_mapper <- img_mapper %>%
+  mutate(mapped_bodypart = case_when(
+    grepl("neck|head", test_name, ignore.case = TRUE) ~ "Neck/Head",    # Includes 'neck' or 'head'
+    grepl("abdomen|pelvis", test_name, ignore.case = TRUE) ~ "Abdomen/Pelvis",  # Includes 'abdomen' or 'pelvis'
+    TRUE ~ "Others"                                                        # Other cases
+  ))
+
+# Display the table head
+head(img_mapper)
+```
+
+
+Things to consider for this dataset for data quality related issues:
+
+Inconsistent Age Format: The Age column contains values in the format Age: XX (e.g., Age: 65), which needs to be converted to numeric values and remove the string portion so the values are congruent.
+
+Inconsistent Date Formats: Some dates are in MM/DD/YYYY format (e.g., 5/16/1924), while others are in YYYY-MM-DD format (e.g., 12/11/2023), leading to potential issues when performing date operations.
+
+Admission Date and Discharge Date Inconsistencies: Some records show that the discharge date is earlier than the admission date, which is not possible and would require data cleaning.
+
+Missing or Invalid Values:  Some fields are not valid dates (e.g., 45177, 45156 in ADMISSION.DATE and DISCHARGE.DATE), which may indicate data corruption or missing information.
+
+Missing Age Information: Some records have missing or incomplete age information, such as non-numeric values (e.g., Age: 50, Age: 100), which may cause issues for calculations.
+
+Outliers in Age:  Some age values seem unusually high (e.g., Age: 100), which might be correct, but they should be reviewed to ensure they align with the corresponding admission/discharge dates.
+
+Potential Duplicates: There might be duplicated rows or records for the same patient, especially when looking at unique identifiers like ID.
+
+Ambiguous or Corrupted Data:  The last row contains incomplete information and needs to be verified and corrected.
